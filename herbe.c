@@ -2,12 +2,13 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/Xrandr.h>
 #include <fcntl.h>
-#include <semaphore.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 #include <unistd.h>
 
 #include "config.h"
@@ -121,13 +122,23 @@ void expire(int sig)
 	XFlush(display);
 }
 
+void read_y_offset(unsigned int **offset, int *id) {
+    int shm_id = shmget(8432, sizeof(unsigned int), IPC_CREAT | 0660);
+    if (shm_id == -1) die("shmget failed");
+
+    *offset = (unsigned int *)shmat(shm_id, 0, 0);
+    if (*offset == (unsigned int *)-1) die("shmat failed\n");
+    *id = shm_id;
+}
+
+void free_y_offset(int id) {
+    shmctl(id, IPC_RMID, NULL);
+}
+
 int main(int argc, char *argv[])
 {
 	if (argc == 1)
-	{
-		sem_unlink("/herbe");
-		die("Usage: %s body", argv[0]);
-	}
+        die("Usage: %s body", argv[0]);
 
 	struct sigaction act_expire, act_ignore;
 
@@ -192,6 +203,13 @@ int main(int argc, char *argv[])
 	if (corner == BOTTOM_LEFT || corner == BOTTOM_RIGHT)
 		y = screen_y + screen_height - height - border_size * 2 - pos_y;
 
+	int y_offset_id;
+	unsigned int *y_offset;
+	read_y_offset(&y_offset, &y_offset_id);
+	y += *y_offset;
+	unsigned int used_y_offset = (*y_offset) += height + padding;
+
+
 	window = XCreateWindow(display, RootWindow(display, screen), x, y, width, height, border_size, DefaultDepth(display, screen),
 						   CopyFromParent, visual, CWOverrideRedirect | CWBackPixel | CWBorderPixel, &attributes);
 
@@ -200,9 +218,6 @@ int main(int argc, char *argv[])
 
 	XSelectInput(display, window, ExposureMask | ButtonPress);
 	XMapWindow(display, window);
-
-	sem_t *mutex = sem_open("/herbe", O_CREAT, 0644, 1);
-	sem_wait(mutex);
 
 	sigaction(SIGUSR1, &act_expire, 0);
 	sigaction(SIGUSR2, &act_expire, 0);
@@ -234,11 +249,10 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	sem_post(mutex);
-	sem_close(mutex);
 
 	freeLines();
 
+	if (used_y_offset == *y_offset) free_y_offset(y_offset_id);
 	XftDrawDestroy(draw);
 	XftColorFree(display, visual, colormap, &color);
 	XftFontClose(display, font);
